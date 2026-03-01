@@ -1,0 +1,14 @@
+services:
+  claude-agent:
+    image: ghcr.io/${GITHUB_REPO:-you/claude-agent}:latest
+    build: .
+    ports:
+      - "${WEBHOOK_PORT:-5000}:5000"
+    volumes:
+      - agent-data:/data
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  agent-data:
