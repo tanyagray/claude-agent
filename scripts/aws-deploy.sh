@@ -133,21 +133,10 @@ ssh_key_path() {
   echo "$HOME/.ssh/claude-agent-$(repo_slug "$REPO").pem"
 }
 
-tags_json() {
-  local slug=$(repo_slug "$REPO")
-  cat <<EOF
-[
-  {"Key":"Name","Value":"${PROJECT}-${slug}"},
-  {"Key":"Project","Value":"${PROJECT}"},
-  {"Key":"TargetRepo","Value":"${REPO}"},
-  {"Key":"ManagedBy","Value":"claude-agent-deploy"}
-]
-EOF
-}
-
 tags_spec() {
   local resource_type=$1
-  echo "ResourceType=${resource_type},Tags=$(tags_json)"
+  local slug=$(repo_slug "$REPO")
+  echo "ResourceType=${resource_type},Tags=[{Key=Name,Value=${PROJECT}-${slug}},{Key=Project,Value=${PROJECT}},{Key=TargetRepo,Value=${REPO}},{Key=ManagedBy,Value=claude-agent-deploy}]"
 }
 
 wait_for_health() {
