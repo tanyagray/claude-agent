@@ -44,6 +44,12 @@ If auth is needed: `ngrok config add-authtoken <token>` — token is at https://
 
 Use the `/create-task` slash command (defined in `.claude/commands/create-task.md`) to create a test task. It runs `scripts/create-task.sh` which writes a properly formatted task file into the `pending/` directory. The worker picks it up automatically if the container is running.
 
+## Render Deployment
+
+This project is deployed on Render. The Render MCP server is configured in `.claude/settings.json`.
+
+**Important:** Before performing any Render actions, you must first execute the `select_workspace` tool with workspace name `Tanya's Workspace`.
+
 ## Useful Commands
 
 ```bash
