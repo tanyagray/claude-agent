@@ -139,7 +139,7 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
         "claude",
         "-p", prompt,
         "--allowedTools", "Bash,Read,Write,Edit",
-        "--yes",
+        "--dangerously-skip-permissions",
     ]
     if config.CLAUDE_USE_MAX:
         cmd.append("--max")
