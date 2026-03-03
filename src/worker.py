@@ -149,13 +149,62 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
         env["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
 
     logger.info("Running Claude Code CLI (timeout=%ds)", config.CLAUDE_TIMEOUT)
-    return subprocess.run(
+    logger.info("Command: %s", " ".join(cmd))
+
+    proc = subprocess.Popen(
         cmd,
         cwd=config.REPO_DIR,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=config.CLAUDE_TIMEOUT,
         env=env,
+    )
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    import selectors
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    sel.register(proc.stderr, selectors.EVENT_READ)
+
+    open_streams = 2
+    start_time = time.time()
+    while open_streams > 0:
+        elapsed = time.time() - start_time
+        if elapsed > config.CLAUDE_TIMEOUT:
+            proc.kill()
+            raise subprocess.TimeoutExpired(cmd, config.CLAUDE_TIMEOUT)
+
+        remaining = config.CLAUDE_TIMEOUT - elapsed
+        events = sel.select(timeout=min(remaining, 30))
+
+        if not events:
+            logger.info("Claude Code still running... (%.0fs elapsed)", elapsed)
+            continue
+
+        for key, _ in events:
+            line = key.fileobj.readline()
+            if not line:
+                sel.unregister(key.fileobj)
+                open_streams -= 1
+                continue
+            line = line.rstrip("\n")
+            if key.fileobj is proc.stdout:
+                stdout_lines.append(line)
+                logger.info("claude> %s", line[:500])
+            else:
+                stderr_lines.append(line)
+                logger.warning("claude-err> %s", line[:500])
+
+    sel.close()
+    proc.wait()
+
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=proc.returncode,
+        stdout="\n".join(stdout_lines),
+        stderr="\n".join(stderr_lines),
     )
 
 
