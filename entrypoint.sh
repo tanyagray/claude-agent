@@ -10,6 +10,8 @@ mkdir -p "$TASKS_DIR/completed"
 mkdir -p "$TASKS_DIR/failed"
 
 echo "Task directories ready at $TASKS_DIR"
-echo "Starting Claude Agent..."
+
+export PORT="${PORT:-5000}"
+echo "Starting Claude Agent on port $PORT..."
 
 exec supervisord -c /etc/supervisor/conf.d/claude-agent.conf
