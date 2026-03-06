@@ -100,6 +100,18 @@ def add_label(issue_number: int, label: str) -> None:
     logger.info("Added label '%s' to issue #%d", label, issue_number)
 
 
+def add_reaction(issue_number: int, content: str) -> None:
+    """Add a reaction to a GitHub issue."""
+    resp = httpx.post(
+        _api_url(f"issues/{issue_number}/reactions"),
+        headers=_headers(),
+        json={"content": content},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    logger.info("Added reaction '%s' to issue #%d", content, issue_number)
+
+
 def remove_label(issue_number: int, label: str) -> None:
     """Remove a label from an issue. Ignores 404 (label not present)."""
     resp = httpx.delete(
