@@ -137,7 +137,7 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
 
     cmd = [
         "claude",
-        "-p", prompt,
+        "-p",
         "--allowedTools", "Bash,Read,Write,Edit",
         "--dangerously-skip-permissions",
     ]
@@ -149,16 +149,19 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
         env["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
 
     logger.info("Running Claude Code CLI (timeout=%ds)", config.CLAUDE_TIMEOUT)
-    logger.info("Command: %s", " ".join(cmd))
+    logger.info("Prompt length: %d chars", len(prompt))
 
     proc = subprocess.Popen(
         cmd,
         cwd=config.REPO_DIR,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         env=env,
     )
+    proc.stdin.write(prompt)
+    proc.stdin.close()
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
@@ -266,6 +269,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
 
             task_queue.complete_task(task.id, branch_name=branch, pr_url=pr_url)
             notify.send(f"PR opened for #{task.issue_number}: {task.summary}\n{pr_url}")
+            _cleanup_branch(branch)
         else:
             # No changes produced
             will_retry = task_queue.fail_task(task.id, "No changes produced")

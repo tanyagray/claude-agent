@@ -33,10 +33,15 @@ COPY supervisord.conf /etc/supervisor/conf.d/claude-agent.conf
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# Data directory (will be a volume mount)
-RUN mkdir -p /data
+# Create a non-root user (Claude Code CLI refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/bash claude-agent
 
-# Git config for the agent
+# Data directory (will be a volume mount)
+RUN mkdir -p /data && chown claude-agent:claude-agent /data
+
+USER claude-agent
+
+# Git config for the non-root user
 RUN git config --global user.name "Claude Agent" \
     && git config --global user.email "claude-agent@noreply"
 
