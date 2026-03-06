@@ -9,6 +9,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import httpx
+
 from src import config
 from src import github_api
 from src import notify
@@ -94,6 +96,84 @@ def _cleanup_branch(branch: str) -> None:
     """Switch back to main and delete the working branch."""
     _run_git(["checkout", "main"], check=False)
     _run_git(["branch", "-D", branch], check=False)
+
+
+def _build_error_comment(error: Exception) -> str:
+    """Build a user-friendly GitHub comment explaining an error to the repo owner."""
+    lines = ["⚠️ **Claude Agent encountered an error working on this issue.**\n"]
+
+    if isinstance(error, subprocess.TimeoutExpired):
+        lines.append(f"**Error:** Claude Code timed out after {config.CLAUDE_TIMEOUT} seconds.\n")
+        lines.append("**Possible causes:**")
+        lines.append("- The task may be too complex to complete within the time limit")
+        lines.append(f"- Current timeout: `CLAUDE_TIMEOUT={config.CLAUDE_TIMEOUT}` — increase this in your agent config if needed\n")
+
+    elif isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        url = str(error.request.url)
+        lines.append(f"**Error:** GitHub API request failed with HTTP {status}.\n")
+        if status in (401, 403):
+            lines.append("**Possible causes:**")
+            lines.append("- `GITHUB_TOKEN` is missing, expired, or lacks required permissions")
+            lines.append("- The token needs `repo` scope (or `public_repo` for public repos)")
+            lines.append("- For creating PRs and comments, ensure the token has write access to the repository\n")
+        elif status == 404:
+            lines.append("**Possible causes:**")
+            lines.append(f"- Resource not found: `{url}`")
+            lines.append("- `GITHUB_REPO` may be set incorrectly (expected format: `owner/repo`)")
+            lines.append("- The token may not have access to this repository\n")
+        elif status == 422:
+            lines.append("**Possible causes:**")
+            lines.append("- A PR for this branch may already exist")
+            lines.append("- The branch may have no commits relative to the base branch\n")
+        elif status == 429:
+            lines.append("**Possible causes:**")
+            lines.append("- GitHub API rate limit exceeded")
+            lines.append("- The agent will retry automatically\n")
+        elif status >= 500:
+            lines.append("**Possible causes:**")
+            lines.append("- GitHub may be experiencing an outage — check https://githubstatus.com")
+            lines.append("- The agent will retry automatically\n")
+
+    elif isinstance(error, httpx.ConnectError | httpx.TimeoutException):
+        lines.append("**Error:** Could not connect to the GitHub API.\n")
+        lines.append("**Possible causes:**")
+        lines.append("- Network connectivity issue from the agent host")
+        lines.append("- GitHub may be experiencing an outage — check https://githubstatus.com\n")
+
+    elif isinstance(error, subprocess.CalledProcessError):
+        cmd = " ".join(str(a) for a in error.cmd) if error.cmd else "unknown"
+        lines.append(f"**Error:** A git/shell command failed (exit code {error.returncode}).\n")
+        lines.append("**Possible causes:**")
+        lines.append("- `GITHUB_TOKEN` may not have push access to the repository")
+        lines.append("- The repository clone may be in a bad state")
+        if error.stderr:
+            lines.append(f"\n**Details:**\n```\n{error.stderr[:500]}\n```")
+
+    else:
+        lines.append(f"**Error:** `{type(error).__name__}: {str(error)[:300]}`\n")
+        lines.append("**Possible causes:**")
+        lines.append("- A required environment variable may be misconfigured")
+        lines.append("- Check agent logs for more details\n")
+
+    lines.append("---")
+    lines.append("*You can re-trigger by commenting `/claude` on this issue once the issue is resolved.*")
+    return "\n".join(lines)
+
+
+def _build_claude_exit_comment(returncode: int, stderr: str) -> str:
+    """Build a comment for when Claude Code exits non-zero and produces no changes."""
+    lines = ["⚠️ **Claude Agent: Claude Code exited with an error and produced no changes.**\n"]
+    lines.append(f"**Exit code:** `{returncode}`\n")
+    lines.append("**Possible causes:**")
+    lines.append("- `ANTHROPIC_API_KEY` is missing, invalid, or out of credits")
+    lines.append("- Anthropic's API may be experiencing an outage — check https://status.anthropic.com")
+    lines.append("- If using `CLAUDE_USE_MAX=true`, the Claude Max session may have expired (`claude login` inside the container)")
+    if stderr:
+        lines.append(f"\n**Error output:**\n```\n{stderr}\n```")
+    lines.append("\n---")
+    lines.append("*You can re-trigger by commenting `/claude` on this issue once the issue is resolved.*")
+    return "\n".join(lines)
 
 
 def build_prompt(task: Task) -> str:
@@ -235,7 +315,8 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
 
         # 3. Run Claude Code
         result = _run_claude(task)
-        if result.returncode != 0:
+        claude_failed = result.returncode != 0
+        if claude_failed:
             logger.warning("Claude Code exited with code %d", result.returncode)
             logger.warning("stderr: %s", result.stderr[-2000:] if result.stderr else "(empty)")
 
@@ -289,6 +370,11 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             _cleanup_branch(branch)
         else:
             # No changes produced
+            error_detail = ""
+            if claude_failed:
+                stderr_snippet = (result.stderr or "").strip()[-500:]
+                error_detail = _build_claude_exit_comment(result.returncode, stderr_snippet)
+
             will_retry = task_queue.fail_task(task.id, "No changes produced")
             if will_retry:
                 notify.send(
@@ -297,17 +383,23 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                 )
             else:
                 if task.issue_number:
-                    github_api.comment_on_issue(
-                        task.issue_number,
-                        "Couldn't determine changes needed after multiple attempts. Needs human input.",
-                    )
+                    if error_detail:
+                        comment = error_detail
+                    else:
+                        comment = "Couldn't determine changes needed after multiple attempts. Needs human input."
+                    github_api.comment_on_issue(task.issue_number, comment)
                 notify.send(f"Failed #{task.issue_number}: {task.summary}")
             _cleanup_branch(branch)
 
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         logger.error("Claude Code timed out for task %s", task.id)
         task_queue.fail_task(task.id, "Claude Code timed out")
         notify.send(f"Timeout on #{task.issue_number}: {task.summary}")
+        if task.issue_number:
+            try:
+                github_api.comment_on_issue(task.issue_number, _build_error_comment(e))
+            except Exception:
+                logger.exception("Failed to post timeout error comment to GitHub")
         if branch:
             _cleanup_branch(branch)
 
@@ -315,6 +407,11 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
         logger.exception("Error processing task %s", task.id)
         task_queue.fail_task(task.id, str(e))
         notify.send(f"Error on #{task.issue_number}: {e}")
+        if task.issue_number:
+            try:
+                github_api.comment_on_issue(task.issue_number, _build_error_comment(e))
+            except Exception:
+                logger.exception("Failed to post error comment to GitHub")
         if branch:
             _cleanup_branch(branch)
 
