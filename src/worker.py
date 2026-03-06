@@ -215,6 +215,10 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
     """Process a single task end-to-end."""
     branch = ""
     try:
+        # 0. React with heart emoji to signal we've picked up the issue
+        if task.issue_number:
+            github_api.add_reaction(task.issue_number, "heart")
+
         # 1. Ensure repo is cloned and up to date
         _ensure_repo()
         _checkout_main()
