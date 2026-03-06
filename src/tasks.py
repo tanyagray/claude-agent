@@ -180,7 +180,11 @@ class TaskQueue:
             will_retry = task.retries < task.max_retries
             if will_retry:
                 task.status = "pending"
-                dst_path = self.base / "pending" / src_path.name
+                # Use current timestamp in filename so retried tasks go to the
+                # end of the queue instead of always being picked up first.
+                now_ts = int(datetime.now(timezone.utc).timestamp())
+                retry_name = f"{now_ts}-{task.source}-{task.issue_number or task.id.split('-', 1)[-1]}.md"
+                dst_path = self.base / "pending" / retry_name
                 logger.info("Task %s failed (attempt %d/%d), retrying", task_id, task.retries, task.max_retries)
             else:
                 task.status = "failed"

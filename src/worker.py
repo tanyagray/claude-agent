@@ -78,9 +78,15 @@ def _create_branch(task: Task) -> str:
     return branch
 
 
-def _has_changes() -> bool:
+def _has_uncommitted_changes() -> bool:
     """Check if there are uncommitted changes in the working tree."""
     result = _run_git(["status", "--porcelain"])
+    return bool(result.stdout.strip())
+
+
+def _has_branch_commits() -> bool:
+    """Check if there are commits on the current branch beyond main."""
+    result = _run_git(["log", "main..HEAD", "--oneline"], check=False)
     return bool(result.stdout.strip())
 
 
@@ -252,11 +258,18 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             _cleanup_branch(branch)
             return
 
-        # 5. Check for changes
-        if _has_changes():
-            commit_msg = f"feat(#{task.issue_number}): {task.summary}" if task.issue_number else f"feat: {task.summary}"
-            _run_git(["add", "-A"])
-            _run_git(["commit", "-m", commit_msg])
+        # 5. Check for changes (uncommitted or already committed by Claude)
+        has_uncommitted = _has_uncommitted_changes()
+        has_commits = _has_branch_commits()
+
+        if has_uncommitted or has_commits:
+            if has_uncommitted:
+                commit_msg = f"feat(#{task.issue_number}): {task.summary}" if task.issue_number else f"feat: {task.summary}"
+                _run_git(["add", "-A"])
+                _run_git(["commit", "-m", commit_msg])
+            else:
+                logger.info("Claude committed changes directly on branch %s", branch)
+
             _run_git(["push", "origin", branch])
 
             pr_url = github_api.create_pr(
