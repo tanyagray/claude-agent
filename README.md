@@ -135,7 +135,7 @@ Copy `.env.example` to `.env` and fill in your values.
 | `SLACK_WEBHOOK_URL` | — | Slack notifications for completions and failures |
 | `REPO_DIR` | `/data/repo` | Where the target repo is cloned |
 | `TASKS_DIR` | `/data/tasks` | Task queue directory |
-| `WEBHOOK_PORT` | `5000` | Port for the webhook server |
+| `PORT` | `5000` | Port for the webhook server |
 | `POLL_INTERVAL` | `60` | Seconds between polling cycles |
 | `MAX_RETRIES_PER_TASK` | `3` | Max attempts before marking a task failed |
 | `CLAUDE_TIMEOUT` | `1800` | Seconds before killing Claude Code (30 min) |

@@ -35,7 +35,7 @@ SLACK_WEBHOOK_URL: str = os.environ.get("SLACK_WEBHOOK_URL", "")
 # --- Defaults ---
 REPO_DIR: str = os.environ.get("REPO_DIR", "/data/repo")
 TASKS_DIR: str = os.environ.get("TASKS_DIR", "/data/tasks")
-WEBHOOK_PORT: int = int(os.environ.get("WEBHOOK_PORT", "5000"))
+PORT: int = int(os.environ.get("PORT", "5000"))
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "60"))
 MAX_RETRIES_PER_TASK: int = int(os.environ.get("MAX_RETRIES_PER_TASK", "3"))
 CLAUDE_TIMEOUT: int = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))

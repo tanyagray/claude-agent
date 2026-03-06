@@ -9,14 +9,27 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from src import config
 from src.tasks import TaskQueue
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Claude Agent Webhook Server")
+_shutting_down = False
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _shutting_down
+    yield
+    logger.info("Shutdown signal received, rejecting new webhooks")
+    _shutting_down = True
+
+
+app = FastAPI(title="Claude Agent Webhook Server", lifespan=lifespan)
 task_queue = TaskQueue(config.TASKS_DIR)
 _start_time = time.monotonic()
 
@@ -43,6 +56,9 @@ async def github_webhook(
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
 ) -> dict[str, str]:
     """Receive and route GitHub webhook events."""
+    if _shutting_down:
+        raise HTTPException(status_code=503, detail="Shutting down")
+
     body = await request.body()
     _verify_signature(body, x_hub_signature_256)
 
