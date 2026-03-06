@@ -306,10 +306,55 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             _cleanup_branch(branch)
 
 
+def _sync_open_issues(task_queue: TaskQueue) -> None:
+    """On startup, queue any open issues with the trigger label not already tracked."""
+    logger.info("Checking GitHub for open issues with label '%s'", config.TRIGGER_LABEL)
+    try:
+        issues = github_api.get_open_issues_with_label(config.TRIGGER_LABEL)
+    except Exception:
+        logger.exception("Failed to fetch open issues from GitHub; skipping startup sync")
+        return
+
+    # Build a set of issue numbers already in the active queue
+    tracked: set[int] = set()
+    for status in ("pending", "in_progress"):
+        for task in task_queue.list_tasks(status):
+            if task.issue_number is not None:
+                tracked.add(task.issue_number)
+
+    queued = 0
+    for issue in issues:
+        issue_number: int = issue["number"]
+        if issue_number in tracked:
+            logger.debug("Issue #%d already in queue, skipping", issue_number)
+            continue
+
+        # Skip issues that the agent already handled (PR open or blocked)
+        label_names = {lbl["name"] for lbl in issue.get("labels", [])}
+        if "claude-pr-open" in label_names or "claude-blocked" in label_names:
+            logger.debug("Issue #%d already processed (labels: %s), skipping", issue_number, label_names)
+            continue
+
+        task_queue.create_task(
+            source="github_issue",
+            event_type="issue_labeled",
+            summary=issue["title"],
+            body=issue.get("body") or "",
+            issue_number=issue_number,
+            max_retries=config.MAX_RETRIES_PER_TASK,
+        )
+        logger.info("Queued missed issue #%d on startup: %s", issue_number, issue["title"])
+        queued += 1
+
+    logger.info("Startup sync complete: %d issue(s) added to queue", queued)
+
+
 def main() -> None:
     """Main worker loop — runs forever, picks up one task at a time."""
     logger.info("Worker started (poll_interval=%ds)", config.POLL_INTERVAL)
     task_queue = TaskQueue(config.TASKS_DIR)
+
+    _sync_open_issues(task_queue)
 
     while True:
         task = task_queue.get_next_task()

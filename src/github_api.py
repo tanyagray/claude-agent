@@ -124,3 +124,27 @@ def remove_label(issue_number: int, label: str) -> None:
         return
     resp.raise_for_status()
     logger.info("Removed label '%s' from issue #%d", label, issue_number)
+
+
+def get_open_issues_with_label(label: str) -> list[dict]:
+    """Return all open issues that have the given label (handles pagination)."""
+    issues: list[dict] = []
+    page = 1
+    while True:
+        resp = httpx.get(
+            _api_url("issues"),
+            headers=_headers(),
+            params={"state": "open", "labels": label, "per_page": 100, "page": page},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            break
+        # GitHub issues endpoint also returns pull requests — skip them
+        issues.extend(item for item in batch if "pull_request" not in item)
+        if len(batch) < 100:
+            break
+        page += 1
+    logger.info("Found %d open issue(s) with label '%s'", len(issues), label)
+    return issues
