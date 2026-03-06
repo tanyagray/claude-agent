@@ -360,7 +360,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                 body=task.body,
             )
 
-            if task.issue_number:
+            if task.issue_number and pr_url:
                 github_api.comment_on_issue(task.issue_number, f"PR ready: {pr_url}")
                 github_api.add_label(task.issue_number, "claude-pr-open")
                 github_api.remove_label(task.issue_number, config.TRIGGER_LABEL)
