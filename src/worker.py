@@ -62,13 +62,17 @@ def _ensure_repo() -> None:
 
 
 def _checkout_main() -> None:
-    """Checkout and pull the default branch."""
+    """Checkout and pull the default branch in the main repo clone."""
     _run_git(["checkout", "main"])
     _run_git(["pull", "origin", "main"])
 
 
-def _create_branch(task: Task) -> str:
-    """Create a working branch for the task."""
+def _create_worktree(task: Task) -> tuple[str, str]:
+    """Create an isolated git worktree for the task.
+
+    Returns (branch_name, worktree_path).
+    The branch is created from the current main HEAD in the main repo clone.
+    """
     ts = int(time.time())
     if task.issue_number:
         slug = _slugify(task.summary)[:30]
@@ -76,26 +80,33 @@ def _create_branch(task: Task) -> str:
     else:
         branch = f"claude/docs-update-{ts}"
 
-    _run_git(["checkout", "-b", branch])
-    return branch
+    worktree_path = str(Path(config.WORKTREES_DIR) / branch)
+    Path(config.WORKTREES_DIR).mkdir(parents=True, exist_ok=True)
+
+    # -b creates the branch from the current HEAD (main) and checks it out in
+    # an isolated directory — completely separate from the main repo clone.
+    _run_git(["worktree", "add", "-b", branch, worktree_path, "main"])
+    logger.info("Created worktree %s on branch %s", worktree_path, branch)
+    return branch, worktree_path
 
 
-def _has_uncommitted_changes() -> bool:
-    """Check if there are uncommitted changes in the working tree."""
-    result = _run_git(["status", "--porcelain"])
+def _has_uncommitted_changes(cwd: str) -> bool:
+    """Check if there are uncommitted changes in the given working tree."""
+    result = _run_git(["status", "--porcelain"], cwd=cwd)
     return bool(result.stdout.strip())
 
 
-def _has_branch_commits() -> bool:
+def _has_branch_commits(cwd: str) -> bool:
     """Check if there are commits on the current branch beyond main."""
-    result = _run_git(["log", "main..HEAD", "--oneline"], check=False)
+    result = _run_git(["log", "main..HEAD", "--oneline"], cwd=cwd, check=False)
     return bool(result.stdout.strip())
 
 
-def _cleanup_branch(branch: str) -> None:
-    """Switch back to main and delete the working branch."""
-    _run_git(["checkout", "main"], check=False)
+def _cleanup_worktree(branch: str, worktree_path: str) -> None:
+    """Remove the worktree directory and delete the local branch."""
+    _run_git(["worktree", "remove", "--force", worktree_path], check=False)
     _run_git(["branch", "-D", branch], check=False)
+    logger.info("Cleaned up worktree %s (branch %s)", worktree_path, branch)
 
 
 def _build_error_comment(error: Exception) -> str:
@@ -161,7 +172,6 @@ def _build_error_comment(error: Exception) -> str:
     return "\n".join(lines)
 
 
-
 def build_prompt(task: Task) -> str:
     """Build the Claude Code prompt for a task."""
     parts = [
@@ -208,6 +218,7 @@ Also read the README.md in the project root for an overview.
 - Only modify files relevant to this task
 - Do not refactor unrelated code
 - Keep changes focused and reviewable
+- **Do NOT run any git commands** (no git add, git commit, git push, git checkout, git branch, etc.) — the system will handle all version control after you finish
 - If you genuinely cannot complete the task, create a file called CLAUDE_BLOCKED.md explaining what you need and why you're stuck""")
 
     return "\n".join(parts)
@@ -253,8 +264,8 @@ def _is_retryable(error_msg: str) -> bool:
     return not any(phrase in low for phrase in _NON_RETRYABLE_ERRORS)
 
 
-def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
-    """Invoke the Claude Code CLI."""
+def _run_claude(task: Task, cwd: str) -> subprocess.CompletedProcess[str]:
+    """Invoke the Claude Code CLI in the given working directory (worktree)."""
     prompt = build_prompt(task)
 
     cmd = [
@@ -270,12 +281,12 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
     if config.ANTHROPIC_API_KEY:
         env["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
 
-    logger.info("Running Claude Code CLI (timeout=%ds)", config.CLAUDE_TIMEOUT)
+    logger.info("Running Claude Code CLI in %s (timeout=%ds)", cwd, config.CLAUDE_TIMEOUT)
     logger.info("Prompt length: %d chars", len(prompt))
 
     proc = subprocess.Popen(
         cmd,
-        cwd=config.REPO_DIR,
+        cwd=cwd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -336,21 +347,22 @@ def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
 def process_task(task: Task, task_queue: TaskQueue) -> None:
     """Process a single task end-to-end."""
     branch = ""
+    worktree_path = ""
     try:
         # 0. React with heart emoji to signal we've picked up the issue
         if task.issue_number:
             github_api.add_reaction(task.issue_number, "heart")
 
-        # 1. Ensure repo is cloned and up to date
+        # 1. Ensure repo is cloned and up to date on main
         _ensure_repo()
         _checkout_main()
 
-        # 2. Create working branch
-        branch = _create_branch(task)
-        logger.info("Working on branch: %s", branch)
+        # 2. Create an isolated worktree branched from main
+        branch, worktree_path = _create_worktree(task)
+        logger.info("Working on branch %s in worktree %s", branch, worktree_path)
 
-        # 3. Run Claude Code
-        result = _run_claude(task)
+        # 3. Run Claude Code inside the isolated worktree
+        result = _run_claude(task, cwd=worktree_path)
         if result.returncode != 0:
             logger.warning("Claude Code exited with code %d", result.returncode)
             logger.warning("stderr: %s", result.stderr[-2000:] if result.stderr else "(empty)")
@@ -365,11 +377,11 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                     )
                 task_queue.fail_task(task.id, error_msg, force_no_retry=True)
                 notify.send(f"Fatal error on #{task.issue_number}: {error_msg}")
-                _cleanup_branch(branch)
+                _cleanup_worktree(branch, worktree_path)
                 return
 
         # 4. Check for blocked state
-        blocked_file = Path(config.REPO_DIR) / "CLAUDE_BLOCKED.md"
+        blocked_file = Path(worktree_path) / "CLAUDE_BLOCKED.md"
         if blocked_file.exists():
             blocked_reason = blocked_file.read_text(encoding="utf-8")
             blocked_file.unlink()
@@ -384,22 +396,22 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
 
             task_queue.fail_task(task.id, blocked_reason)
             notify.send(f"Blocked on #{task.issue_number}: {task.summary}")
-            _cleanup_branch(branch)
+            _cleanup_worktree(branch, worktree_path)
             return
 
-        # 5. Check for changes (uncommitted or already committed by Claude)
-        has_uncommitted = _has_uncommitted_changes()
-        has_commits = _has_branch_commits()
+        # 5. Check for changes in the worktree (uncommitted or already committed by Claude)
+        has_uncommitted = _has_uncommitted_changes(worktree_path)
+        has_commits = _has_branch_commits(worktree_path)
 
         if has_uncommitted or has_commits:
             if has_uncommitted:
                 commit_msg = f"feat(#{task.issue_number}): {task.summary}" if task.issue_number else f"feat: {task.summary}"
-                _run_git(["add", "-A"])
-                _run_git(["commit", "-m", commit_msg])
+                _run_git(["add", "-A"], cwd=worktree_path)
+                _run_git(["commit", "-m", commit_msg], cwd=worktree_path)
             else:
                 logger.info("Claude committed changes directly on branch %s", branch)
 
-            _run_git(["push", "origin", branch])
+            _run_git(["push", "origin", branch], cwd=worktree_path)
 
             pr_url = github_api.create_pr(
                 branch=branch,
@@ -415,7 +427,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
 
             task_queue.complete_task(task.id, branch_name=branch, pr_url=pr_url)
             notify.send(f"PR opened for #{task.issue_number}: {task.summary}\n{pr_url}")
-            _cleanup_branch(branch)
+            _cleanup_worktree(branch, worktree_path)
         else:
             # No changes produced
             claude_error = _parse_claude_error(result.stderr) if result.returncode != 0 else None
@@ -435,7 +447,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                         comment = "Couldn't determine changes needed after multiple attempts. Needs human input."
                     github_api.comment_on_issue(task.issue_number, comment)
                 notify.send(f"Failed #{task.issue_number}: {claude_error or task.summary}")
-            _cleanup_branch(branch)
+            _cleanup_worktree(branch, worktree_path)
 
     except subprocess.TimeoutExpired as e:
         logger.error("Claude Code timed out for task %s", task.id)
@@ -446,8 +458,8 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                 github_api.comment_on_issue(task.issue_number, _build_error_comment(e))
             except Exception:
                 logger.exception("Failed to post timeout error comment to GitHub")
-        if branch:
-            _cleanup_branch(branch)
+        if worktree_path:
+            _cleanup_worktree(branch, worktree_path)
 
     except Exception as e:
         logger.exception("Error processing task %s", task.id)
@@ -458,8 +470,8 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                 github_api.comment_on_issue(task.issue_number, _build_error_comment(e))
             except Exception:
                 logger.exception("Failed to post error comment to GitHub")
-        if branch:
-            _cleanup_branch(branch)
+        if worktree_path:
+            _cleanup_worktree(branch, worktree_path)
 
 
 def _sync_open_issues(task_queue: TaskQueue) -> None:
