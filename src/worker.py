@@ -109,7 +109,17 @@ def build_prompt(task: Task) -> str:
         parts.append("## Additional Instructions")
         parts.append(task.additional_context + "\n")
 
-    parts.append("""## Project Context
+    parts.append("""## Progress Reporting
+Before each major step, run: echo '[PROGRESS] <description>'
+For example:
+  echo '[PROGRESS] Reading issue details and codebase...'
+  echo '[PROGRESS] Implementing the feature...'
+  echo '[PROGRESS] Running tests...'
+  echo '[PROGRESS] Done.'
+For any step that might take more than 30 seconds (API calls, file processing, long test runs), \
+print additional [PROGRESS] updates every ~30s so the log stays active.
+
+## Project Context
 Read all files in ./docs/ for project context, architecture, and coding standards.
 Also read the README.md in the project root for an overview.
 
