@@ -163,7 +163,7 @@ class TaskQueue:
         finally:
             self._unlock(fd)
 
-    def fail_task(self, task_id: str, error: str) -> bool:
+    def fail_task(self, task_id: str, error: str, force_no_retry: bool = False) -> bool:
         """Fail a task. Returns True if it will retry, False if permanently failed."""
         fd = self._lock()
         try:
@@ -177,7 +177,7 @@ class TaskQueue:
             task.error_log = error
             task.started_at = None
 
-            will_retry = task.retries < task.max_retries
+            will_retry = not force_no_retry and task.retries < task.max_retries
             if will_retry:
                 task.status = "pending"
                 # Use current timestamp in filename so retried tasks go to the

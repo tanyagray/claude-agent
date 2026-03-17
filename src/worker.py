@@ -161,20 +161,6 @@ def _build_error_comment(error: Exception) -> str:
     return "\n".join(lines)
 
 
-def _build_claude_exit_comment(returncode: int, stderr: str) -> str:
-    """Build a comment for when Claude Code exits non-zero and produces no changes."""
-    lines = ["⚠️ **Claude Agent: Claude Code exited with an error and produced no changes.**\n"]
-    lines.append(f"**Exit code:** `{returncode}`\n")
-    lines.append("**Possible causes:**")
-    lines.append("- `ANTHROPIC_API_KEY` is missing, invalid, or out of credits")
-    lines.append("- Anthropic's API may be experiencing an outage — check https://status.anthropic.com")
-    lines.append("- If using `CLAUDE_USE_MAX=true`, the Claude Max session may have expired (`claude login` inside the container)")
-    if stderr:
-        lines.append(f"\n**Error output:**\n```\n{stderr}\n```")
-    lines.append("\n---")
-    lines.append("*You can re-trigger by commenting `/claude` on this issue once the issue is resolved.*")
-    return "\n".join(lines)
-
 
 def build_prompt(task: Task) -> str:
     """Build the Claude Code prompt for a task."""
@@ -215,6 +201,46 @@ Also read the README.md in the project root for an overview.
 - If you genuinely cannot complete the task, create a file called CLAUDE_BLOCKED.md explaining what you need and why you're stuck""")
 
     return "\n".join(parts)
+
+
+def _parse_claude_error(stderr: str) -> str | None:
+    """Extract a human-readable error from Claude CLI stderr, or None if unrecognised."""
+    if not stderr:
+        return None
+    low = stderr.lower()
+    if any(p in low for p in ("out of credit", "insufficient credit", "credit balance", "no credits")):
+        return "Claude is out of API credits — please top up your Anthropic account balance."
+    if any(p in low for p in ("claude max", "max subscription", "subscription required")):
+        return (
+            "Claude Max subscription error. "
+            "CLAUDE_USE_MAX is only valid for local development with a personal Claude Max plan. "
+            "On a server, set ANTHROPIC_API_KEY instead."
+        )
+    if any(p in low for p in ("invalid api key", "authentication", "unauthorized", "401")):
+        return "Claude authentication failed — check that ANTHROPIC_API_KEY is valid."
+    if any(p in low for p in ("rate limit", "too many requests", "429")):
+        return "Claude hit a rate limit."
+    if any(p in low for p in ("quota", "usage limit", "usage_limit")):
+        return "Claude usage quota exceeded."
+    # Fall back to the last non-empty stderr line
+    lines = [ln.strip() for ln in stderr.strip().splitlines() if ln.strip()]
+    if lines:
+        return f"Claude error: {lines[-1]}"
+    return None
+
+
+_NON_RETRYABLE_ERRORS = (
+    "out of api credits",
+    "top up",
+    "authentication failed",
+    "invalid api key",
+    "claude max subscription error",
+)
+
+
+def _is_retryable(error_msg: str) -> bool:
+    low = error_msg.lower()
+    return not any(phrase in low for phrase in _NON_RETRYABLE_ERRORS)
 
 
 def _run_claude(task: Task) -> subprocess.CompletedProcess[str]:
@@ -315,10 +341,22 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
 
         # 3. Run Claude Code
         result = _run_claude(task)
-        claude_failed = result.returncode != 0
-        if claude_failed:
+        if result.returncode != 0:
             logger.warning("Claude Code exited with code %d", result.returncode)
             logger.warning("stderr: %s", result.stderr[-2000:] if result.stderr else "(empty)")
+            error_msg = _parse_claude_error(result.stderr)
+            if error_msg and not _is_retryable(error_msg):
+                # Fatal error — surface it immediately, no point retrying
+                logger.error("Non-retryable Claude error: %s", error_msg)
+                if task.issue_number:
+                    github_api.comment_on_issue(
+                        task.issue_number,
+                        f"Claude encountered an error and could not complete this task:\n\n> {error_msg}",
+                    )
+                task_queue.fail_task(task.id, error_msg, force_no_retry=True)
+                notify.send(f"Fatal error on #{task.issue_number}: {error_msg}")
+                _cleanup_branch(branch)
+                return
 
         # 4. Check for blocked state
         blocked_file = Path(config.REPO_DIR) / "CLAUDE_BLOCKED.md"
@@ -370,12 +408,8 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             _cleanup_branch(branch)
         else:
             # No changes produced
-            error_detail = ""
-            if claude_failed:
-                stderr_snippet = (result.stderr or "").strip()[-500:]
-                error_detail = _build_claude_exit_comment(result.returncode, stderr_snippet)
-
-            will_retry = task_queue.fail_task(task.id, "No changes produced")
+            claude_error = _parse_claude_error(result.stderr) if result.returncode != 0 else None
+            will_retry = task_queue.fail_task(task.id, claude_error or "No changes produced")
             if will_retry:
                 notify.send(
                     f"No changes for #{task.issue_number}, retrying "
@@ -383,12 +417,14 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
                 )
             else:
                 if task.issue_number:
-                    if error_detail:
-                        comment = error_detail
+                    if claude_error:
+                        comment = (
+                            f"Claude encountered an error and could not complete this task:\n\n> {claude_error}"
+                        )
                     else:
                         comment = "Couldn't determine changes needed after multiple attempts. Needs human input."
                     github_api.comment_on_issue(task.issue_number, comment)
-                notify.send(f"Failed #{task.issue_number}: {task.summary}")
+                notify.send(f"Failed #{task.issue_number}: {claude_error or task.summary}")
             _cleanup_branch(branch)
 
     except subprocess.TimeoutExpired as e:
