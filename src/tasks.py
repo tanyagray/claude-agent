@@ -33,6 +33,7 @@ class Task:
     summary: str
     body: str
     issue_number: Optional[int] = None
+    pr_number: Optional[int] = None
     priority: int = 0
     retries: int = 0
     max_retries: int = 3
@@ -78,13 +79,15 @@ class TaskQueue:
         summary: str,
         body: str,
         issue_number: Optional[int] = None,
+        pr_number: Optional[int] = None,
+        branch_name: Optional[str] = None,
         additional_context: Optional[str] = None,
         max_retries: int = 3,
     ) -> Task:
         """Create a new task file in pending/."""
         now = datetime.now(timezone.utc)
         ts = int(now.timestamp())
-        slug = issue_number or _slugify(summary)[:30]
+        slug = issue_number or pr_number or _slugify(summary)[:30]
         task_id = f"{ts}-{source}-{slug}"
         filename = f"{task_id}.md"
 
@@ -95,6 +98,8 @@ class TaskQueue:
             summary=summary,
             body=body,
             issue_number=issue_number,
+            pr_number=pr_number,
+            branch_name=branch_name,
             max_retries=max_retries,
             created_at=now.isoformat(),
             additional_context=additional_context,
@@ -239,6 +244,7 @@ def _write_task(path: Path, task: Task) -> None:
         "source": task.source,
         "event_type": task.event_type,
         "issue_number": task.issue_number,
+        "pr_number": task.pr_number,
         "summary": task.summary,
         "priority": task.priority,
         "retries": task.retries,
@@ -284,6 +290,7 @@ def _read_task(path: Path, status: str) -> Task:
         summary=meta.get("summary", ""),
         body=body,
         issue_number=meta.get("issue_number"),
+        pr_number=meta.get("pr_number"),
         priority=meta.get("priority", 0),
         retries=meta.get("retries", 0),
         max_retries=meta.get("max_retries", 3),
