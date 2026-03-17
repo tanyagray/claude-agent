@@ -109,6 +109,24 @@ def _cleanup_worktree(branch: str, worktree_path: str) -> None:
     logger.info("Cleaned up worktree %s (branch %s)", worktree_path, branch)
 
 
+def _create_review_worktree(branch: str) -> str:
+    """Check out an existing PR branch into an isolated worktree (detached HEAD).
+
+    Returns the worktree_path.
+    """
+    worktree_path = str(Path(config.WORKTREES_DIR) / branch)
+    Path(config.WORKTREES_DIR).mkdir(parents=True, exist_ok=True)
+    _run_git(["worktree", "add", "--detach", worktree_path, f"origin/{branch}"])
+    logger.info("Created review worktree %s for branch %s", worktree_path, branch)
+    return worktree_path
+
+
+def _cleanup_review_worktree(worktree_path: str) -> None:
+    """Remove a review worktree (detached — no local branch to delete)."""
+    _run_git(["worktree", "remove", "--force", worktree_path], check=False)
+    logger.info("Cleaned up review worktree %s", worktree_path)
+
+
 def _build_error_comment(error: Exception) -> str:
     """Build a user-friendly GitHub comment explaining an error to the repo owner."""
     lines = ["⚠️ **Claude Agent encountered an error working on this issue.**\n"]
@@ -224,6 +242,61 @@ Also read the README.md in the project root for an overview.
     return "\n".join(parts)
 
 
+def build_review_prompt(task: Task) -> str:
+    """Build the Claude Code prompt for addressing PR review feedback."""
+    parts = [
+        "You are an autonomous developer working on a side project.\n",
+        f"## Task\nAddress code review feedback on PR #{task.pr_number}\n",
+        "## Review Feedback",
+        task.body + "\n",
+    ]
+
+    if task.additional_context:
+        parts.append("## Additional Instructions")
+        parts.append(task.additional_context + "\n")
+
+    parts.append("""## Progress Reporting
+Before each major step, run: echo '[PROGRESS] <description>'
+
+## Project Context
+Read all files in ./docs/ for project context, architecture, and coding standards.
+Also read the README.md in the project root for an overview.
+
+## Instructions
+1. Read the current state of the code on this branch before making any changes
+2. Address each piece of review feedback carefully
+3. For inline comments, find the exact file and line referenced and fix the issue
+4. Follow existing code patterns and conventions in the repo
+5. Run any existing test/lint/build commands you find (package.json scripts, Makefile, etc.)
+6. Fix any test or lint failures before finishing
+7. Do NOT ask for clarification — make reasonable decisions based on the reviewer's intent
+8. After making all code changes, create a file called CLAUDE_REVIEW_RESPONSES.json in the repo root
+
+## CLAUDE_REVIEW_RESPONSES.json format
+For each inline comment (identified by its comment_id), decide:
+- If you simply did what was asked with no caveats: use a thumbs-up reaction, no text reply
+- If you took a different approach, made a tradeoff, or want to explain your reasoning: write a short text reply
+
+Write the file as a JSON array, one entry per inline comment:
+```json
+[
+  {"comment_id": 123, "reaction": "+1", "reply": null},
+  {"comment_id": 456, "reaction": null, "reply": "I went with X instead because Y — happy to change if you disagree."}
+]
+```
+Only include comments that appeared in the review feedback above (use the comment_id values listed there).
+Do not include this file in the git commit — it will be read and then deleted by the automation.
+
+## Constraints
+- Only modify files relevant to the review feedback
+- Do not refactor unrelated code
+- Keep changes focused and reviewable
+- **Do NOT run any git commands** — the system will handle all version control after you finish
+- If you genuinely cannot address the feedback, create a file called CLAUDE_BLOCKED.md explaining what you need and why you're stuck""")
+
+    return "\n".join(parts)
+
+
 def _parse_claude_error(stderr: str) -> str | None:
     """Extract a human-readable error from Claude CLI stderr, or None if unrecognised."""
     if not stderr:
@@ -266,7 +339,10 @@ def _is_retryable(error_msg: str) -> bool:
 
 def _run_claude(task: Task, cwd: str) -> subprocess.CompletedProcess[str]:
     """Invoke the Claude Code CLI in the given working directory (worktree)."""
-    prompt = build_prompt(task)
+    if task.event_type == "pr_review_changes_requested":
+        prompt = build_review_prompt(task)
+    else:
+        prompt = build_prompt(task)
 
     cmd = [
         "claude",
@@ -344,8 +420,142 @@ def _run_claude(task: Task, cwd: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _post_review_responses(pr_number: int, responses: list[dict]) -> None:
+    """Post per-comment reactions and replies from CLAUDE_REVIEW_RESPONSES.json."""
+    for entry in responses:
+        comment_id = entry.get("comment_id")
+        if not comment_id:
+            continue
+        reaction = entry.get("reaction")
+        reply = entry.get("reply")
+        try:
+            if reaction:
+                github_api.react_to_review_comment(comment_id, reaction)
+            if reply:
+                github_api.reply_to_review_comment(pr_number, comment_id, reply)
+        except Exception:
+            logger.exception("Failed to post response for comment %d", comment_id)
+
+
+def _process_pr_review_task(task: Task, task_queue: TaskQueue) -> None:
+    """Process a PR review 'changes_requested' task using an isolated worktree."""
+    branch = task.branch_name or ""
+    worktree_path = ""
+    if not branch:
+        logger.error("PR review task %s has no branch_name, cannot process", task.id)
+        task_queue.fail_task(task.id, "No branch_name set on PR review task", force_no_retry=True)
+        return
+
+    try:
+        # 1. Ensure repo is up to date and check out the PR branch in a worktree
+        _ensure_repo()
+        worktree_path = _create_review_worktree(branch)
+        logger.info("Working on PR #%d review in worktree %s", task.pr_number, worktree_path)
+
+        # 2. Run Claude Code with the review feedback prompt
+        result = _run_claude(task, cwd=worktree_path)
+        if result.returncode != 0:
+            logger.warning("Claude Code exited with code %d", result.returncode)
+            logger.warning("stderr: %s", result.stderr[-2000:] if result.stderr else "(empty)")
+            error_msg = _parse_claude_error(result.stderr)
+            if error_msg and not _is_retryable(error_msg):
+                github_api.comment_on_issue(
+                    task.pr_number,
+                    f"Claude encountered an error and could not address the review:\n\n> {error_msg}",
+                )
+                task_queue.fail_task(task.id, error_msg, force_no_retry=True)
+                notify.send(f"Fatal error on PR #{task.pr_number} review: {error_msg}")
+                _cleanup_review_worktree(worktree_path)
+                return
+
+        # 3. Check for blocked state
+        blocked_file = Path(worktree_path) / "CLAUDE_BLOCKED.md"
+        if blocked_file.exists():
+            blocked_reason = blocked_file.read_text(encoding="utf-8")
+            blocked_file.unlink()
+            logger.warning("Claude is blocked: %s", blocked_reason[:200])
+
+            github_api.comment_on_issue(
+                task.pr_number,
+                f"I got stuck trying to address the review feedback:\n\n{blocked_reason}",
+            )
+            task_queue.fail_task(task.id, blocked_reason)
+            notify.send(f"Blocked addressing review on PR #{task.pr_number}: {task.summary}")
+            _cleanup_review_worktree(worktree_path)
+            return
+
+        # 4. Read and remove the review responses file before committing
+        import json as _json
+        responses_file = Path(worktree_path) / "CLAUDE_REVIEW_RESPONSES.json"
+        review_responses: list[dict] = []
+        if responses_file.exists():
+            try:
+                review_responses = _json.loads(responses_file.read_text(encoding="utf-8"))
+            except Exception:
+                logger.exception("Failed to parse CLAUDE_REVIEW_RESPONSES.json")
+            responses_file.unlink()
+
+        # 5. Check for changes and commit/push
+        if _has_uncommitted_changes(worktree_path):
+            _run_git(["add", "-A"], cwd=worktree_path)
+            _run_git(["commit", "-m", f"fix: address review feedback on PR #{task.pr_number}"], cwd=worktree_path)
+            # Push detached HEAD back to the PR branch on origin
+            _run_git(["push", "origin", f"HEAD:{branch}"], cwd=worktree_path)
+
+            _post_review_responses(task.pr_number, review_responses)
+
+            github_api.comment_on_issue(
+                task.pr_number,
+                "I've addressed the review feedback. Please take another look.",
+            )
+            task_queue.complete_task(task.id, branch_name=branch, pr_url=task.pr_url)
+            notify.send(f"Addressed review on PR #{task.pr_number}: {task.summary}")
+        else:
+            claude_error = _parse_claude_error(result.stderr) if result.returncode != 0 else None
+            will_retry = task_queue.fail_task(task.id, claude_error or "No changes produced from review feedback")
+            if will_retry:
+                notify.send(
+                    f"No changes for PR #{task.pr_number} review, retrying "
+                    f"({task.retries + 1}/{task.max_retries})"
+                )
+            else:
+                github_api.comment_on_issue(
+                    task.pr_number,
+                    "I wasn't able to determine how to address the review feedback after multiple attempts. Needs human input.",
+                )
+                notify.send(f"Failed to address review on PR #{task.pr_number}: {task.summary}")
+
+        _cleanup_review_worktree(worktree_path)
+
+    except subprocess.TimeoutExpired as e:
+        logger.error("Claude Code timed out for task %s", task.id)
+        task_queue.fail_task(task.id, "Claude Code timed out")
+        notify.send(f"Timeout on PR #{task.pr_number} review: {task.summary}")
+        try:
+            github_api.comment_on_issue(task.pr_number, _build_error_comment(e))
+        except Exception:
+            logger.exception("Failed to post timeout error comment to GitHub")
+        if worktree_path:
+            _cleanup_review_worktree(worktree_path)
+
+    except Exception as e:
+        logger.exception("Error processing PR review task %s", task.id)
+        task_queue.fail_task(task.id, str(e))
+        notify.send(f"Error on PR #{task.pr_number} review: {e}")
+        try:
+            github_api.comment_on_issue(task.pr_number, _build_error_comment(e))
+        except Exception:
+            logger.exception("Failed to post error comment to GitHub")
+        if worktree_path:
+            _cleanup_review_worktree(worktree_path)
+
+
 def process_task(task: Task, task_queue: TaskQueue) -> None:
     """Process a single task end-to-end."""
+    if task.event_type == "pr_review_changes_requested":
+        _process_pr_review_task(task, task_queue)
+        return
+
     branch = ""
     worktree_path = ""
     try:
