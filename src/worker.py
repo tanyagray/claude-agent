@@ -42,14 +42,29 @@ def _run_git(args: list[str], cwd: str | None = None, check: bool = True) -> sub
     )
 
 
+def _refresh_remote_url() -> None:
+    """Update the origin remote URL with a fresh token.
+
+    GitHub App installation tokens expire after 1 hour. Without this,
+    git fetch/push would fail with a 401 once the token embedded in
+    the clone URL expires.
+    """
+    token = github_api.get_github_token()
+    _run_git([
+        "remote", "set-url", "origin",
+        f"https://x-access-token:{token}@github.com/{config.GITHUB_REPO}.git",
+    ])
+
+
 def _ensure_repo() -> None:
     """Clone the repo if it doesn't exist, otherwise fetch latest."""
     if not Path(config.REPO_DIR).exists():
         logger.info("Cloning repo %s", config.GITHUB_REPO)
+        token = github_api.get_github_token()
         subprocess.run(
             [
                 "git", "clone",
-                f"https://x-access-token:{config.GITHUB_TOKEN}@github.com/{config.GITHUB_REPO}.git",
+                f"https://x-access-token:{token}@github.com/{config.GITHUB_REPO}.git",
                 config.REPO_DIR,
             ],
             check=True,
@@ -58,6 +73,7 @@ def _ensure_repo() -> None:
             timeout=300,
         )
     else:
+        _refresh_remote_url()
         _run_git(["fetch", "origin"])
 
 
@@ -500,6 +516,7 @@ def _process_pr_review_task(task: Task, task_queue: TaskQueue) -> None:
             _run_git(["add", "-A"], cwd=worktree_path)
             _run_git(["commit", "-m", f"fix: address review feedback on PR #{task.pr_number}"], cwd=worktree_path)
             # Push detached HEAD back to the PR branch on origin
+            _refresh_remote_url()  # token may have expired during long Claude run
             _run_git(["push", "origin", f"HEAD:{branch}"], cwd=worktree_path)
 
             _post_review_responses(task.pr_number, review_responses)
@@ -621,6 +638,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             else:
                 logger.info("Claude committed changes directly on branch %s", branch)
 
+            _refresh_remote_url()  # token may have expired during long Claude run
             _run_git(["push", "origin", branch], cwd=worktree_path)
 
             pr_url = github_api.create_pr(

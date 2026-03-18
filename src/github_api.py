@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime
 from typing import Optional
 
 import httpx
+import jwt
 
 logger = logging.getLogger(__name__)
 
 # Lazy import to avoid circular dependency at module level
 _config = None
+
+# Installation token cache (per-process; each process refreshes independently)
+_installation_token: str = ""
+_installation_token_expires: float = 0.0
 
 
 def _get_config():
@@ -21,10 +28,63 @@ def _get_config():
     return _config
 
 
-def _headers() -> dict[str, str]:
+def _generate_jwt() -> str:
+    """Generate a GitHub App JWT valid for 10 minutes."""
     cfg = _get_config()
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,   # issued-at: 60 s in the past to cover clock skew
+        "exp": now + 600,  # expires: 10 minutes from now
+        "iss": cfg.GITHUB_APP_ID,
+    }
+    return jwt.encode(payload, cfg.GITHUB_APP_PRIVATE_KEY, algorithm="RS256")
+
+
+def _get_installation_token() -> str:
+    """Return a valid GitHub App installation token, refreshing if needed."""
+    global _installation_token, _installation_token_expires
+
+    # Refresh 5 minutes before expiry so we never use a token right at its edge
+    if _installation_token and time.time() < _installation_token_expires - 300:
+        return _installation_token
+
+    cfg = _get_config()
+    app_jwt = _generate_jwt()
+
+    resp = httpx.post(
+        f"https://api.github.com/app/installations/{cfg.GITHUB_APP_INSTALLATION_ID}/access_tokens",
+        headers={
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    _installation_token = data["token"]
+    expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
+    _installation_token_expires = expires_at.timestamp()
+
+    logger.info(
+        "Refreshed GitHub App installation token (expires %s)",
+        data["expires_at"],
+    )
+    return _installation_token
+
+
+def get_github_token() -> str:
+    """Return the active GitHub token — installation token or PAT depending on config."""
+    cfg = _get_config()
+    if cfg.USING_GITHUB_APP:
+        return _get_installation_token()
+    return cfg.GITHUB_TOKEN
+
+
+def _headers() -> dict[str, str]:
     return {
-        "Authorization": f"Bearer {cfg.GITHUB_TOKEN}",
+        "Authorization": f"Bearer {get_github_token()}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
