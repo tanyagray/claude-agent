@@ -27,6 +27,9 @@ GitHub Issue  ──►  Webhook  ──►  Task Queue  ──►  Claude Code 
 - [Features](#features)
 - [How It Works](#how-it-works)
 - [Quick Start](#quick-start)
+- [GitHub Setup](#github-setup)
+  - [GitHub App (recommended)](#github-app-recommended)
+  - [Personal Access Token](#personal-access-token)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
   - [Local / Docker Compose](#local--docker-compose)
@@ -103,9 +106,64 @@ docker compose up -d
 
 Then complete the setup:
 
-1. [Set up your GitHub webhook](#set-up-github-webhook)
-2. [Create the `claude` trigger label](#create-the-trigger-label)
-3. Open an issue on your target repo, add the `claude` label, and watch it work
+1. [Set up GitHub auth](#github-setup) — GitHub App (recommended) or PAT
+2. [Set up your GitHub webhook](#set-up-github-webhook)
+3. [Create the `claude` trigger label](#create-the-trigger-label)
+4. Open an issue on your target repo, add the `claude` label, and watch it work
+
+---
+
+## GitHub Setup
+
+The agent needs GitHub credentials to read issues, push branches, and open PRs. You have two options.
+
+### GitHub App (recommended)
+
+A GitHub App gives the agent its own distinct identity — commits, comments, and PR assignments appear as `your-app-name[bot]` rather than your personal account. It is the right choice for production use.
+
+**Create the app automatically** using the included skill (requires `gh` CLI):
+
+```
+/setup-github-app
+```
+
+This opens GitHub in your browser, walks you through creating the app with the right permissions, installs it on your target repo, and prints the exact env vars to paste into your `.env`.
+
+**What permissions the app requires:**
+
+| Permission | Level | Why |
+|------------|-------|-----|
+| Contents | Read & write | Push feature branches |
+| Issues | Read & write | Read issue body, add labels and comments |
+| Pull requests | Read & write | Open PRs |
+| Metadata | Read | Required by GitHub for all apps |
+| Workflows | Read & write | Modify and trigger GitHub Actions workflows |
+
+**After running the skill**, add these to your `.env`:
+
+```env
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
+GITHUB_APP_INSTALLATION_ID=78901234
+GITHUB_BOT_NAME=your-app-name[bot]
+GITHUB_BOT_EMAIL=123456+your-app-name[bot]@users.noreply.github.com
+```
+
+> **Workflows note:** By default, pull requests opened by a GitHub App do not automatically trigger CI. Enable this in your repo under **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**.
+
+### Personal Access Token
+
+Simpler to set up but commits will appear as your own GitHub account. Suitable for personal projects where that distinction doesn't matter.
+
+1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)**
+2. Generate a new token with scopes: `repo`, `workflow`
+3. Add to your `.env`:
+
+```env
+GITHUB_TOKEN=ghp_your-personal-access-token
+```
+
+Classic PATs with the `workflow` scope have no restrictions on triggering or modifying GitHub Actions workflows.
 
 ---
 
@@ -117,9 +175,19 @@ Copy `.env.example` to `.env` and fill in your values.
 
 | Variable | Description |
 |----------|-------------|
-| `GITHUB_TOKEN` | Personal access token with `repo` scope |
 | `GITHUB_REPO` | Target repository in `owner/repo` format |
 | `GITHUB_WEBHOOK_SECRET` | Random secret string for webhook validation |
+
+### GitHub Auth (pick one — see [GitHub Setup](#github-setup))
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_APP_ID` | App ID from your GitHub App settings |
+| `GITHUB_APP_PRIVATE_KEY` | PEM private key (newlines as `\n`) |
+| `GITHUB_APP_INSTALLATION_ID` | Installation ID for your target repo |
+| `GITHUB_BOT_NAME` | Display name for git commits (e.g. `myapp[bot]`) |
+| `GITHUB_BOT_EMAIL` | Email for git commits (e.g. `123+myapp[bot]@users.noreply.github.com`) |
+| `GITHUB_TOKEN` | PAT fallback — used if App vars are not set |
 
 ### Claude Code Billing (pick one)
 

@@ -16,11 +16,26 @@ def _get_bool(key: str, default: bool = False) -> bool:
 
 
 # --- Required ---
-GITHUB_TOKEN: str = _get_required("GITHUB_TOKEN")
 GITHUB_REPO: str = _get_required("GITHUB_REPO")  # owner/repo
 GITHUB_WEBHOOK_SECRET: str = _get_required("GITHUB_WEBHOOK_SECRET")
 
-# Claude billing
+# --- GitHub auth: App (recommended) or PAT fallback ---
+GITHUB_APP_ID: str = os.environ.get("GITHUB_APP_ID", "")
+# PEM content — newlines may be stored as literal \n in env vars
+_raw_key = os.environ.get("GITHUB_APP_PRIVATE_KEY", "")
+GITHUB_APP_PRIVATE_KEY: str = _raw_key.replace("\\n", "\n") if _raw_key else ""
+GITHUB_APP_INSTALLATION_ID: str = os.environ.get("GITHUB_APP_INSTALLATION_ID", "")
+GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")  # PAT fallback
+
+USING_GITHUB_APP: bool = bool(GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY and GITHUB_APP_INSTALLATION_ID)
+
+if not USING_GITHUB_APP and not GITHUB_TOKEN:
+    raise RuntimeError(
+        "GitHub auth not configured. Set GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + "
+        "GITHUB_APP_INSTALLATION_ID (recommended) or GITHUB_TOKEN (PAT fallback)."
+    )
+
+# --- Claude billing ---
 CLAUDE_USE_MAX: bool = _get_bool("CLAUDE_USE_MAX", False)
 ANTHROPIC_API_KEY: str = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -31,6 +46,12 @@ if not CLAUDE_USE_MAX and not ANTHROPIC_API_KEY:
 
 # --- Optional ---
 SLACK_WEBHOOK_URL: str = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+# Git identity for commits.
+# For a GitHub App the email must be: {APP_ID}+{APP_SLUG}[bot]@users.noreply.github.com
+# The /setup-github-app skill outputs the correct values — just paste them into .env.
+GITHUB_BOT_NAME: str = os.environ.get("GITHUB_BOT_NAME", "Claude Agent")
+GITHUB_BOT_EMAIL: str = os.environ.get("GITHUB_BOT_EMAIL", "claude-agent@noreply")
 
 # --- Defaults ---
 REPO_DIR: str = os.environ.get("REPO_DIR", "/data/repo")

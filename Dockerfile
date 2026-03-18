@@ -41,10 +41,6 @@ RUN mkdir -p /data && chown claude-agent:claude-agent /data
 
 USER claude-agent
 
-# Git config for the non-root user
-RUN git config --global user.name "Claude Agent" \
-    && git config --global user.email "claude-agent@noreply"
-
 EXPOSE 5000
 
 ENTRYPOINT ["/app/entrypoint.sh"]

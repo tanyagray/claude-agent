@@ -40,14 +40,29 @@ def _run_git(args: list[str], cwd: str | None = None, check: bool = True) -> sub
     )
 
 
+def _refresh_remote_url() -> None:
+    """Update the origin remote URL with a fresh token.
+
+    GitHub App installation tokens expire after 1 hour. Without this,
+    git fetch/push would fail with a 401 once the token embedded in
+    the clone URL expires.
+    """
+    token = github_api.get_github_token()
+    _run_git([
+        "remote", "set-url", "origin",
+        f"https://x-access-token:{token}@github.com/{config.GITHUB_REPO}.git",
+    ])
+
+
 def _ensure_repo() -> None:
     """Clone the repo if it doesn't exist, otherwise fetch latest."""
     if not Path(config.REPO_DIR).exists():
         logger.info("Cloning repo %s", config.GITHUB_REPO)
+        token = github_api.get_github_token()
         subprocess.run(
             [
                 "git", "clone",
-                f"https://x-access-token:{config.GITHUB_TOKEN}@github.com/{config.GITHUB_REPO}.git",
+                f"https://x-access-token:{token}@github.com/{config.GITHUB_REPO}.git",
                 config.REPO_DIR,
             ],
             check=True,
@@ -56,6 +71,7 @@ def _ensure_repo() -> None:
             timeout=300,
         )
     else:
+        _refresh_remote_url()
         _run_git(["fetch", "origin"])
 
 
@@ -257,6 +273,7 @@ def process_task(task: Task, task_queue: TaskQueue) -> None:
             commit_msg = f"feat(#{task.issue_number}): {task.summary}" if task.issue_number else f"feat: {task.summary}"
             _run_git(["add", "-A"])
             _run_git(["commit", "-m", commit_msg])
+            _refresh_remote_url()  # token may have expired during long Claude run
             _run_git(["push", "origin", branch])
 
             pr_url = github_api.create_pr(
