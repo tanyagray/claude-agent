@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 from src import config
+from src import github_api
 from src.tasks import TaskQueue
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,8 @@ async def github_webhook(
         return _handle_comment_event(payload, action)
     elif x_github_event == "push":
         return _handle_push_event(payload)
+    elif x_github_event == "pull_request_review":
+        return _handle_pr_review_event(payload, action)
     else:
         logger.debug("Ignoring event: %s", x_github_event)
         return {"status": "ignored"}
@@ -121,6 +124,57 @@ def _handle_comment_event(payload: dict[str, Any], action: str) -> dict[str, str
         max_retries=config.MAX_RETRIES_PER_TASK,
     )
     logger.info("Queued /claude task for issue #%d", issue["number"])
+    return {"status": "accepted"}
+
+
+def _handle_pr_review_event(payload: dict[str, Any], action: str) -> dict[str, str]:
+    """Handle 'pull_request_review' webhook — trigger on 'changes_requested' reviews."""
+    if action != "submitted":
+        return {"status": "ignored"}
+
+    review = payload.get("review", {})
+    if review.get("state") != "changes_requested":
+        return {"status": "ignored"}
+
+    pr = payload["pull_request"]
+    pr_number: int = pr["number"]
+    pr_title: str = pr["title"]
+    pr_branch: str = pr["head"]["ref"]
+    reviewer: str = review["user"]["login"]
+    review_id: int = review["id"]
+    review_body: str = review.get("body") or ""
+
+    # Fetch inline review comments from GitHub
+    try:
+        inline_comments = github_api.get_pr_review_comments(pr_number, review_id)
+    except Exception:
+        logger.exception("Failed to fetch inline review comments for PR #%d", pr_number)
+        inline_comments = []
+
+    # Build the task body from the reviewer's feedback
+    body_parts = [f"**Reviewer:** {reviewer}\n"]
+    if review_body:
+        body_parts.append(f"**Review summary:**\n{review_body}\n")
+    if inline_comments:
+        body_parts.append("**Inline comments:**\n")
+        for c in inline_comments:
+            path = c.get("path", "unknown file")
+            line = c.get("line") or c.get("original_line", "?")
+            comment_id = c["id"]
+            body_parts.append(f"- comment_id:{comment_id} `{path}` line {line}: {c['body']}")
+
+    body = "\n".join(body_parts)
+
+    task_queue.create_task(
+        source="github_pr",
+        event_type="pr_review_changes_requested",
+        summary=f"Address review on PR #{pr_number}: {pr_title}",
+        body=body,
+        pr_number=pr_number,
+        branch_name=pr_branch,
+        max_retries=config.MAX_RETRIES_PER_TASK,
+    )
+    logger.info("Queued review task for PR #%d reviewed by %s", pr_number, reviewer)
     return {"status": "accepted"}
 
 

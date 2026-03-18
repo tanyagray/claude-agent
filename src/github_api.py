@@ -186,6 +186,43 @@ def remove_label(issue_number: int, label: str) -> None:
     logger.info("Removed label '%s' from issue #%d", label, issue_number)
 
 
+def reply_to_review_comment(pr_number: int, comment_id: int, body: str) -> None:
+    """Post a reply to an inline PR review comment."""
+    resp = httpx.post(
+        _api_url(f"pulls/{pr_number}/comments"),
+        headers=_headers(),
+        json={"body": body, "in_reply_to": comment_id},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    logger.info("Replied to review comment %d on PR #%d", comment_id, pr_number)
+
+
+def react_to_review_comment(comment_id: int, content: str) -> None:
+    """Add a reaction to an inline PR review comment."""
+    resp = httpx.post(
+        _api_url(f"pulls/comments/{comment_id}/reactions"),
+        headers=_headers(),
+        json={"content": content},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    logger.info("Reacted '%s' to review comment %d", content, comment_id)
+
+
+def get_pr_review_comments(pr_number: int, review_id: int) -> list[dict]:
+    """Return all inline comments for a specific PR review."""
+    resp = httpx.get(
+        _api_url(f"pulls/{pr_number}/reviews/{review_id}/comments"),
+        headers=_headers(),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    comments = resp.json()
+    logger.info("Fetched %d inline comment(s) for PR #%d review %d", len(comments), pr_number, review_id)
+    return comments
+
+
 def get_open_issues_with_label(label: str) -> list[dict]:
     """Return all open issues that have the given label (handles pagination)."""
     issues: list[dict] = []

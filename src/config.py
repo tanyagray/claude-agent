@@ -65,3 +65,4 @@ TRIGGER_LABEL: str = os.environ.get("TRIGGER_LABEL", "claude")
 # Derived
 GITHUB_OWNER: str = GITHUB_REPO.split("/")[0]
 GITHUB_REPO_NAME: str = GITHUB_REPO.split("/")[1]
+WORKTREES_DIR: str = os.environ.get("WORKTREES_DIR", "/data/worktrees")
